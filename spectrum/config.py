@@ -47,14 +47,14 @@ class Config:
     # ---------------- Sigma sweep (fixed Nv) ----------------
     sigma_sweep_nv: int = 12        # Nv used for the disorder-strength sweep
     sigma_list: List[float] = field(
-        default_factory=lambda: [0.01, 0.03, 0.05, 0.08]
+        default_factory=lambda: [0, 0.01, 0.03, 0.05, 0.08]
     )
 
     # ---------------- Paths ----------------
     results_dir: str = "results"
-    # Optional "without disorder" reference curve (two columns: E, intensity).
-    # Left as None: the overlay simply skips it when absent.
-    reference_file: Optional[str] = None
+    # "Without disorder" reference curve. Columns: E, I (0 and 1). Plotted on top
+    # of everything. Set to None (or use --no-reference) to skip it.
+    reference_file: Optional[str] = "spectrum_ref_2mol_2.2.pl"
 
     # ---------------- Derived ----------------
     @property

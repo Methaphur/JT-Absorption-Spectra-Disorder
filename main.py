@@ -54,7 +54,20 @@ def parse_args():
                         "sweeping Nv.")
     p.add_argument("--sigmas", type=float, nargs="+", default=None,
                    help="Sigma values for --sigma-sweep (default: config sigma_list).")
+    # ---- reference ("without disorder") curve, overlaid on top ----
+    p.add_argument("--reference", action=argparse.BooleanOptionalAction, default=True,
+                   help="Overlay the reference curve on top (use --no-reference to hide).")
+    p.add_argument("--reference-file", default=None,
+                   help="Path to the reference curve (default: config reference_file).")
     return p.parse_args()
+
+
+def apply_reference_args(args, cfg: Config) -> None:
+    """Resolve the reference-curve CLI flags onto the config."""
+    if not args.reference:
+        cfg.reference_file = None
+    elif args.reference_file is not None:
+        cfg.reference_file = args.reference_file
 
 
 def run_sigma_sweep(args, cfg: Config) -> None:
@@ -110,6 +123,7 @@ def main():
         cfg.n_realizations = args.realizations
     if args.results_dir is not None:
         cfg.results_dir = args.results_dir
+    apply_reference_args(args, cfg)
 
     if args.sigma_sweep:
         run_sigma_sweep(args, cfg)
