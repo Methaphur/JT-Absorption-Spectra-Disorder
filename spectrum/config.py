@@ -22,12 +22,12 @@ class Config:
 
     # Electronic site energies: eps_i = eps + delta_i
     eps: float = 7.0
-    delta1: float = 0.2
-    delta2: float = -0.2
+    delta1: float = 0
+    delta2: float = 0
 
     # ---------------- Disorder ----------------
     sigma: float = 0.03             # disorder strength W (eV)
-    n_realizations: int = 20
+    n_realizations: int = 1
     rng_seed: int = 1234
 
     # ---------------- Spectrum grid / broadening ----------------

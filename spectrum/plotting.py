@@ -24,7 +24,7 @@ def _plot_reference(ax, cfg: Config) -> None:
         I_ref = I_ref / I_ref.max()
     ax.plot(
         E_ref, I_ref,
-        color="black", linewidth=2.5, linestyle="--",
+        color="black", linewidth=1, linestyle="--",
         label="Without disorder (ref)", zorder=10,
     )
 
