@@ -1,0 +1,326 @@
+# Disorder-Averaged Vibronic–Cavity Absorption Spectra
+
+A modular Python project that computes disorder-averaged absorption spectra for a
+two-molecule vibronic system coupled to a cavity, sweeping over the number of
+vibrational levels `Nv` and overlaying the resulting spectra on a single plot.
+
+This is a refactor of the original notebook `Spectrum_symm_avgdisorder_2.2 (3).ipynb`
+into a reusable, resumable, progress-tracked command-line tool.
+
+---
+
+## Table of contents
+
+- [The physics](#the-physics)
+- [Project layout](#project-layout)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Command-line usage](#command-line-usage)
+- [Configuration](#configuration)
+- [Output files](#output-files)
+- [How it works](#how-it-works)
+- [Performance notes](#performance-notes)
+- [Reproducing / cross-checking the notebook](#reproducing--cross-checking-the-notebook)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## The physics
+
+Each basis state is an 8-tuple:
+
+```
+(e1, np1, nm1, e2, np2, nm2, cp, cm)
+```
+
+| Symbol        | Meaning                                                       |
+|---------------|---------------------------------------------------------------|
+| `e1`, `e2`    | Electronic state of molecule 1 / 2: `'A'` (ground), `'Ep'`, `'Em'` (excited doublet) |
+| `np1`, `nm1`  | b+ / b− vibrational quanta of molecule 1 (0 … `Nv-1`)         |
+| `np2`, `nm2`  | b+ / b− vibrational quanta of molecule 2 (0 … `Nv-1`)         |
+| `cp`, `cm`    | Cavity photon occupations of the two photon modes (0 or 1)    |
+
+The full product basis is filtered down to a single **symmetry sector** before
+diagonalization:
+
+- **Single excitation** `Nex = 1` — total of electronic excitations plus cavity
+  photons equals one.
+- **Angular-momentum sector** `Jz = -1`, where `Jz = 2·Lz + Sz + lz` with
+  `Lz = (np1-nm1)+(np2-nm2)`, `Sz` from the electronic labels, and `lz = cp-cm`.
+
+The Hamiltonian is
+
+```
+H = H_electronic + H_vibrational + H_cavity + H_JahnTeller(kappa) + H_matter-cavity(g)
+```
+
+- **Electronic**: site energies `eps1`, `eps2` (only when that molecule is excited),
+  with per-realization Gaussian **disorder** of strength `sigma`.
+- **Vibrational**: `omega · (np1 + nm1 + np2 + nm2)`.
+- **Cavity**: `omega_c · (cp + cm)`.
+- **Jahn–Teller (vibronic) coupling** `kappa`: mixes `Ep ↔ Em` while raising/lowering
+  a vibrational quantum.
+- **Matter–cavity coupling** `g = Omega / (2·√N)`: exchanges an electronic excitation
+  for a cavity photon.
+
+For each of `n_realizations` disorder samples the Hamiltonian is diagonalized, and the
+absorption **intensity** of each eigenstate is the squared overlap with the initial
+state `('A',0,0,'A',0,0,0,1)`. Every eigenvalue is broadened by a **Lorentzian** of
+FWHM `gamma`, summed, and averaged over realizations to produce the final spectrum.
+
+---
+
+## Project layout
+
+```
+Summer-Internship-2026/
+├── main.py                 # CLI entry point: sweep Nv, save/resume, overlay plot
+├── requirements.txt        # numpy, scipy, matplotlib, tqdm
+├── README.md               # this file
+├── spectrum/               # the package
+│   ├── __init__.py
+│   ├── config.py           # all physical + run parameters (Config dataclass)
+│   ├── basis.py            # basis construction + Nex/Jz sector filtering
+│   ├── operators.py        # second-quantized ladder + electronic operators
+│   ├── hamiltonian.py      # static H (built once/Nv) + per-realization diagonal
+│   ├── spectrum.py         # disorder averaging + Lorentzian broadening
+│   ├── storage.py          # per-Nv save/load (.npz + .dat), resume logic
+│   └── plotting.py         # overlay all spectra (+ optional reference curve)
+└── results/                # created at runtime
+    ├── spectrum_Nv2.npz    # full result per Nv (arrays + provenance)
+    ├── spectrum_Nv2.dat    # portable two-column text (E, intensity)
+    ├── ...
+    └── overlay_spectra.png # final overlaid figure
+```
+
+---
+
+## Installation
+
+The project targets the bundled virtual environment `venv/` (Python 3.14).
+
+```bash
+cd Summer-Internship-2026
+venv/bin/pip install -r requirements.txt
+```
+
+Dependencies: **numpy**, **scipy**, **matplotlib**, **tqdm**.
+(`qutip` is *not* required — the original notebook imported it but never used it.)
+
+---
+
+## Quick start
+
+```bash
+# Full sweep over Nv = 2..12 (the default), overlay at the end
+venv/bin/python main.py
+
+# Fast smoke test: two small Nv, few realizations, no GUI window
+venv/bin/python main.py --nv 2 3 --realizations 3 --no-show
+```
+
+Results and the overlay figure land in `results/`.
+
+---
+
+## Command-line usage
+
+```
+venv/bin/python main.py [--nv N [N ...]] [--realizations K]
+                        [--force] [--no-show] [--results-dir DIR]
+```
+
+| Flag              | Description                                                                 |
+|-------------------|-----------------------------------------------------------------------------|
+| `--nv N [N ...]`  | Explicit list of `Nv` values to compute. Default: `Config.nv_list` (`2..12`).|
+| `--realizations K`| Override the number of disorder realizations for this run.                  |
+| `--force`         | Recompute every `Nv` even if a saved result already exists.                 |
+| `--no-show`       | Save the overlay figure without opening an interactive window (headless).   |
+| `--results-dir D` | Write outputs to `D` instead of the configured `results/`.                  |
+
+**Examples**
+
+```bash
+# Only the even Nv values
+venv/bin/python main.py --nv 2 4 6 8 10 12
+
+# Recompute Nv=12 from scratch with a heavier disorder average
+venv/bin/python main.py --nv 12 --realizations 500 --force
+
+# Headless run on a server
+venv/bin/python main.py --no-show
+```
+
+---
+
+## Configuration
+
+All parameters live in [`spectrum/config.py`](spectrum/config.py) as a `Config`
+dataclass. Edit the defaults there, or override the common ones from the command line.
+
+| Parameter          | Default        | Meaning                                            |
+|--------------------|----------------|----------------------------------------------------|
+| `omega`            | `0.08196`      | Vibrational quantum (eV)                           |
+| `kappa`            | `0.180312`     | Jahn–Teller (vibronic) coupling (eV)               |
+| `omega_c`          | `6.85`         | Cavity photon energy (eV)                          |
+| `Omega`            | `2·6.85·0.05`  | Collective light–matter coupling scale             |
+| `N`                | `2`            | Number of molecules                                |
+| `Np`               | `2`            | Cavity photon-number cutoff (states 0, 1)          |
+| `eps`              | `7.0`          | Base electronic site energy (eV)                   |
+| `delta1`, `delta2` | `+0.2`, `-0.2` | Site detunings → `eps1 = 7.2`, `eps2 = 6.8`        |
+| `sigma`            | `0.03`         | Disorder strength *W* (eV)                         |
+| `n_realizations`   | `200`          | Number of disorder samples averaged                |
+| `rng_seed`         | `1234`         | Seed for reproducible disorder                     |
+| `E_min`, `E_max`   | `6.0`, `8.0`   | Spectrum energy window (eV)                        |
+| `E_points`         | `2000`         | Grid resolution                                    |
+| `gamma`            | `0.044`        | Lorentzian FWHM (eV)                               |
+| `initial_state`    | `('A',0,0,'A',0,0,0,1)` | State whose overlap defines the intensity |
+| `nex_target`       | `1`            | Excitation-number sector                           |
+| `jz_target`        | `-1`           | `Jz` sector                                        |
+| `nv_list`          | `range(2,13)`  | Default `Nv` sweep                                 |
+| `results_dir`      | `"results"`    | Output directory                                   |
+| `reference_file`   | `None`         | Optional "without disorder" curve (see below)      |
+
+> **Note on `eps1`/`eps2`.** In the original notebook these were defined only in a
+> commented-out cell yet used by the Hamiltonian loop. They are now derived properties
+> `eps1 = eps + delta1` and `eps2 = eps + delta2`.
+
+### Optional reference curve
+
+To overlay a pre-computed "without disorder" spectrum, set `reference_file` in
+`config.py` to the path of a two-column (`E  intensity`) text file (lines beginning
+with `#` are treated as comments). If the file is missing, the overlay simply omits it.
+
+---
+
+## Output files
+
+For each `Nv`, two files are written **immediately** after it is computed:
+
+- **`results/spectrum_Nv{Nv}.npz`** — the complete result, loadable with
+  `numpy.load`. Keys:
+  - `E` — energy grid, shape `(E_points,)`
+  - `spectrum` — normalized broadened spectrum, shape `(E_points,)`
+  - `all_evals` — eigenvalues, shape `(n_realizations, dim)`
+  - `all_intensity` — per-eigenstate intensities, shape `(n_realizations, dim)`
+  - `Nv`, `dim`, and provenance scalars (`n_realizations`, `sigma`, `gamma`,
+    `rng_seed`, `eps1`, `eps2`, `omega`, `kappa`, `omega_c`, `Omega`)
+- **`results/spectrum_Nv{Nv}.dat`** — a portable two-column text file (`E  intensity`)
+  for import into other tools.
+
+At the end of the sweep:
+
+- **`results/overlay_spectra.png`** — all computed spectra overlaid (one curve per
+  `Nv`), plus the optional reference curve.
+
+Loading a saved result in your own script:
+
+```python
+import numpy as np
+d = np.load("results/spectrum_Nv12.npz")
+E, spec = d["E"], d["spectrum"]
+```
+
+---
+
+## How it works
+
+`main.py` orchestrates the sweep:
+
+1. Build a `Config`, applying any CLI overrides.
+2. For each `Nv` (outer progress bar):
+   - If `results/spectrum_Nv{Nv}.npz` exists and `--force` was **not** given, **load
+     and skip** (resume).
+   - Otherwise compute the spectrum, then **save immediately** so partial progress
+     survives an interruption.
+3. Overlay all collected spectra and write `overlay_spectra.png`.
+4. Print a summary of which `Nv` were computed vs loaded, plus their sector dimensions.
+
+Per-`Nv` computation (`spectrum.compute_spectrum_for_Nv`):
+
+1. `basis.build_sector_basis` builds the full product basis and filters to the
+   `Nex=1`, `Jz=-1` sector.
+2. `hamiltonian.build_static_hamiltonian` builds the **disorder-independent** matrix
+   once (vibrational + cavity diagonal, Jahn–Teller and matter–cavity couplings).
+3. For each disorder realization (inner progress bar): draw disordered site energies,
+   add the electronic diagonal in place, `numpy.linalg.eigh`, record eigenvalues and
+   the initial-state overlap intensities, then restore the diagonal.
+4. Sum Lorentzians over all realizations and eigenvalues; normalize.
+
+### Progress bars
+
+Three nested `tqdm` bars are shown:
+- **`Nv sweep`** — outer loop over `Nv`.
+- **`H(Nv=…) diag`** — Hamiltonian assembly for the current `Nv`.
+- **`disorder(Nv=…)`** — the per-realization diagonalization loop.
+
+---
+
+## Performance notes
+
+- Only the **electronic diagonal** depends on disorder. The expensive Python assembly
+  loop therefore runs **once per `Nv`**; each realization only updates the diagonal in
+  place before diagonalizing. This is numerically identical to rebuilding the full
+  matrix every realization, but far cheaper.
+- The cost is dominated by `eigh` on a dense `dim × dim` matrix, repeated
+  `n_realizations` times. `dim` grows with `Nv`:
+
+  | Nv | dim  |
+  |----|------|
+  | 2  | 30   |
+  | 3  | 105  |
+  | …  | …    |
+  | 12 | 6900 |
+
+  Small `Nv` finish in well under a second; `Nv = 10, 12` at 200 realizations take
+  substantially longer.
+- **Everything is resumable.** Because each `Nv` is saved as soon as it finishes, you
+  can stop the run (Ctrl-C) and restart later — completed `Nv` are loaded from disk and
+  skipped. Use `--force` to recompute.
+
+---
+
+## Reproducing / cross-checking the notebook
+
+The modular Hamiltonian matches the original notebook exactly. For `Nv = 12`:
+
+```
+dim              : 6900     (notebook: 6900)
+Hermitian        : True
+non-zero entries : 24724    (notebook: 24724)
+diagonal entries : 6900     (notebook: 6900)
+initial state    : index 0
+```
+
+You can re-verify with:
+
+```bash
+venv/bin/python - <<'PY'
+import numpy as np
+from spectrum.config import Config
+from spectrum.basis import build_sector_basis
+from spectrum.hamiltonian import build_static_hamiltonian, electronic_masks, electronic_diagonal
+
+cfg = Config(); Nv = 12
+basis, index = build_sector_basis(Nv, cfg.nex_target, cfg.jz_target)
+H = build_static_hamiltonian(Nv, basis, index, cfg, show_progress=False)
+m1, m2 = electronic_masks(basis); d = np.arange(len(basis))
+H[d, d] += electronic_diagonal(m1, m2, cfg.eps1, cfg.eps2)
+print("dim", len(basis), "| Hermitian", np.allclose(H, H.T),
+      "| nonzero", np.count_nonzero(H))
+PY
+```
+
+---
+
+## Troubleshooting
+
+- **`ModuleNotFoundError: No module named 'numpy'`** — install the dependencies into
+  the venv: `venv/bin/pip install -r requirements.txt`.
+- **A plot window never appears / running over SSH** — pass `--no-show`; the figure is
+  still written to `results/overlay_spectra.png`.
+- **`Initial state (...) not in the Nv=… sector basis`** — the configured
+  `initial_state` does not satisfy the `Nex`/`Jz` sector constraints; check
+  `initial_state`, `nex_target`, and `jz_target` in `config.py`.
+- **Want to start over** — delete `results/` (or the specific `spectrum_Nv*.npz`
+  files) and rerun, or use `--force`.
