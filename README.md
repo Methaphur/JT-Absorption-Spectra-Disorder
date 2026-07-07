@@ -137,6 +137,8 @@ venv/bin/python main.py [--nv N [N ...]] [--realizations K]
 | `--force`         | Recompute every `Nv` even if a saved result already exists.                 |
 | `--no-show`       | Save the overlay figure without opening an interactive window (headless).   |
 | `--results-dir D` | Write outputs to `D` instead of the configured `results/`.                  |
+| `--sigma-sweep`   | Sweep disorder strength `sigma` for a **single** `Nv` instead of sweeping `Nv`. |
+| `--sigmas S [S ...]` | Sigma values for `--sigma-sweep` (default: `Config.sigma_list`).         |
 
 **Examples**
 
@@ -149,6 +151,39 @@ venv/bin/python main.py --nv 12 --realizations 500 --force
 
 # Headless run on a server
 venv/bin/python main.py --no-show
+```
+
+### Sigma sweep (fixed Nv, varying disorder strength)
+
+Instead of sweeping `Nv`, compute several spectra for **one** `Nv` at different
+disorder strengths `sigma` and overlay them. The static Hamiltonian is built **once**
+and reused for every `sigma`, so only the disorder loop reruns.
+
+```bash
+# Sweep sigma for Nv=12 using the configured sigma_list
+venv/bin/python main.py --sigma-sweep --nv 12
+
+# Explicit sigma values
+venv/bin/python main.py --sigma-sweep --nv 8 --sigmas 0.01 0.03 0.05 0.08 --no-show
+```
+
+- The `Nv` for the sweep is the first value passed to `--nv`, or `Config.sigma_sweep_nv`
+  (default `12`) if `--nv` is omitted.
+- Sigma values come from `--sigmas`, or `Config.sigma_list`
+  (default `[0.01, 0.03, 0.05, 0.08]`).
+- Each `(Nv, sigma)` is saved to its own file and resumed/skipped on rerun, exactly
+  like the `Nv` sweep. Use `--force` to recompute.
+
+Programmatic use:
+
+```python
+from spectrum.config import Config
+from spectrum.spectrum import compute_spectrum_sigma_sweep
+
+cfg = Config()
+results = compute_spectrum_sigma_sweep(Nv=12, sigma_list=[0.01, 0.03, 0.05], cfg=cfg)
+for res in results:
+    print(res["sigma"], res["spectrum"].max())
 ```
 
 ---
@@ -178,6 +213,8 @@ dataclass. Edit the defaults there, or override the common ones from the command
 | `nex_target`       | `1`            | Excitation-number sector                           |
 | `jz_target`        | `-1`           | `Jz` sector                                        |
 | `nv_list`          | `range(2,13)`  | Default `Nv` sweep                                 |
+| `sigma_sweep_nv`   | `12`           | `Nv` used by `--sigma-sweep` when `--nv` is omitted |
+| `sigma_list`       | `[0.01,0.03,0.05,0.08]` | Default disorder strengths for the sigma sweep |
 | `results_dir`      | `"results"`    | Output directory                                   |
 | `reference_file`   | `None`         | Optional "without disorder" curve (see below)      |
 
@@ -212,6 +249,13 @@ At the end of the sweep:
 
 - **`results/overlay_spectra.png`** — all computed spectra overlaid (one curve per
   `Nv`), plus the optional reference curve.
+
+The **sigma sweep** writes analogous files tagged by both `Nv` and `sigma`:
+
+- `results/spectrum_Nv{Nv}_sigma{sigma}.npz` and `.dat` — one per `(Nv, sigma)`
+  (the `.npz` also stores the `sigma` used).
+- `results/overlay_sigma_Nv{Nv}.png` — the spectra for that `Nv` overlaid, one curve
+  per `sigma`.
 
 Loading a saved result in your own script:
 

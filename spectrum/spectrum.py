@@ -1,6 +1,15 @@
-"""Disorder averaging and Lorentzian broadening for a single Nv."""
+"""Disorder averaging and Lorentzian broadening.
 
-from typing import Dict
+Two entry points:
+
+* :func:`compute_spectrum_for_Nv` — one spectrum for a single ``Nv`` at the
+  configured ``sigma`` (used by the Nv sweep).
+* :func:`compute_spectrum_sigma_sweep` — several spectra for a single ``Nv``,
+  one per disorder strength ``sigma``. The static Hamiltonian does not depend
+  on ``sigma``, so it is built once and reused across the whole sweep.
+"""
+
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 from tqdm import tqdm
@@ -18,17 +27,20 @@ def lorentzian(x, x0, gamma):
     return (1 / np.pi) * (0.5 * gamma) / ((x - x0) ** 2 + (0.5 * gamma) ** 2)
 
 
-def compute_spectrum_for_Nv(Nv: int, cfg: Config, show_progress: bool = True) -> Dict:
-    """Compute the disorder-averaged absorption spectrum for one ``Nv``.
+# ---------------------------------------------------------------------------
+# Shared building blocks
+# ---------------------------------------------------------------------------
+def _prepare_Nv(Nv: int, cfg: Config, show_progress: bool):
+    """Build the sector basis and disorder-independent Hamiltonian for one Nv.
 
-    Returns a dict with the energy grid, broadened spectrum, and the raw
-    per-realization eigenvalues / intensities.
+    Returns ``(H, mask1, mask2, i0, dim)``.
     """
     basis_final, basis_index = build_sector_basis(Nv, cfg.nex_target, cfg.jz_target)
     dim = len(basis_final)
     if dim == 0:
-        raise ValueError(f"Empty sector for Nv={Nv} (Nex={cfg.nex_target}, Jz={cfg.jz_target}).")
-
+        raise ValueError(
+            f"Empty sector for Nv={Nv} (Nex={cfg.nex_target}, Jz={cfg.jz_target})."
+        )
     if cfg.initial_state not in basis_index:
         raise ValueError(
             f"Initial state {cfg.initial_state} not in the Nv={Nv} sector basis."
@@ -37,28 +49,40 @@ def compute_spectrum_for_Nv(Nv: int, cfg: Config, show_progress: bool = True) ->
 
     H = build_static_hamiltonian(Nv, basis_final, basis_index, cfg, show_progress)
     mask1, mask2 = electronic_masks(basis_final)
-    d = np.arange(dim)
+    return H, mask1, mask2, i0, dim
 
+
+def _disorder_average(
+    H: np.ndarray,
+    mask1: np.ndarray,
+    mask2: np.ndarray,
+    i0: int,
+    sigma: float,
+    cfg: Config,
+    show_progress: bool,
+    desc: str,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Average over disorder realizations at a given ``sigma``.
+
+    The electronic diagonal is added in place before ``eigh`` and restored
+    afterwards, so ``H`` is left unchanged for reuse across sigmas.
+    """
+    dim = H.shape[0]
+    d = np.arange(dim)
     rng = np.random.default_rng(cfg.rng_seed)
 
     all_evals = np.empty((cfg.n_realizations, dim))
     all_intensity = np.empty((cfg.n_realizations, dim))
 
-    realizations = range(cfg.n_realizations)
+    iterator = range(cfg.n_realizations)
     if show_progress:
-        realizations = tqdm(
-            realizations,
-            desc=f"  disorder(Nv={Nv})",
-            leave=False,
-            unit="real",
-        )
+        iterator = tqdm(iterator, desc=desc, leave=False, unit="real")
 
-    for r in realizations:
-        eps1_dis = cfg.eps1 + rng.normal(0, cfg.sigma)
-        eps2_dis = cfg.eps2 + rng.normal(0, cfg.sigma)
+    for r in iterator:
+        eps1_dis = cfg.eps1 + rng.normal(0, sigma)
+        eps2_dis = cfg.eps2 + rng.normal(0, sigma)
         elec = electronic_diagonal(mask1, mask2, eps1_dis, eps2_dis)
 
-        # Add electronic diagonal in place, diagonalize, then restore.
         H[d, d] += elec
         evals, evecs = np.linalg.eigh(H)
         H[d, d] -= elec
@@ -71,7 +95,11 @@ def compute_spectrum_for_Nv(Nv: int, cfg: Config, show_progress: bool = True) ->
         all_evals[r] = evals
         all_intensity[r] = intensity
 
-    # ---- Lorentzian-broadened, disorder-averaged spectrum ----
+    return all_evals, all_intensity
+
+
+def _broaden(all_evals: np.ndarray, all_intensity: np.ndarray, cfg: Config):
+    """Lorentzian-broaden and disorder-average onto the energy grid."""
     E = np.linspace(cfg.E_min, cfg.E_max, cfg.E_points)
     spectrum = np.zeros_like(E)
     for evals, intensity in zip(all_evals, all_intensity):
@@ -80,12 +108,68 @@ def compute_spectrum_for_Nv(Nv: int, cfg: Config, show_progress: bool = True) ->
     smax = spectrum.max()
     if smax > 0:
         spectrum = spectrum / smax
+    return E, spectrum
+
+
+# ---------------------------------------------------------------------------
+# Public entry points
+# ---------------------------------------------------------------------------
+def compute_spectrum_for_Nv(Nv: int, cfg: Config, show_progress: bool = True) -> Dict:
+    """Disorder-averaged absorption spectrum for one ``Nv`` at ``cfg.sigma``."""
+    H, mask1, mask2, i0, dim = _prepare_Nv(Nv, cfg, show_progress)
+
+    all_evals, all_intensity = _disorder_average(
+        H, mask1, mask2, i0, cfg.sigma, cfg, show_progress, f"  disorder(Nv={Nv})"
+    )
+    E, spectrum = _broaden(all_evals, all_intensity, cfg)
 
     return {
         "Nv": Nv,
+        "sigma": cfg.sigma,
         "dim": dim,
         "E": E,
         "spectrum": spectrum,
         "all_evals": all_evals,
         "all_intensity": all_intensity,
     }
+
+
+def compute_spectrum_sigma_sweep(
+    Nv: int,
+    sigma_list: Sequence[float],
+    cfg: Config,
+    show_progress: bool = True,
+) -> List[Dict]:
+    """Compute one spectrum per disorder strength ``sigma`` for a fixed ``Nv``.
+
+    The static Hamiltonian is built once and reused for every ``sigma``; only
+    the disorder loop reruns. Returns a list of result dicts (one per sigma),
+    each shaped like :func:`compute_spectrum_for_Nv`'s output plus a ``sigma``
+    key.
+    """
+    H, mask1, mask2, i0, dim = _prepare_Nv(Nv, cfg, show_progress)
+
+    sigmas = list(sigma_list)
+    outer = sigmas
+    if show_progress:
+        outer = tqdm(sigmas, desc=f"sigma sweep(Nv={Nv})", unit="sigma")
+
+    results: List[Dict] = []
+    for sigma in outer:
+        all_evals, all_intensity = _disorder_average(
+            H, mask1, mask2, i0, sigma, cfg, show_progress, f"  disorder(sigma={sigma:g})"
+        )
+        E, spectrum = _broaden(all_evals, all_intensity, cfg)
+        results.append(
+            {
+                "Nv": Nv,
+                "sigma": sigma,
+                "dim": dim,
+                "E": E,
+                "spectrum": spectrum,
+                "all_evals": all_evals,
+                "all_intensity": all_intensity,
+            }
+        )
+
+    return results

@@ -19,15 +19,20 @@ import os
 from tqdm import tqdm
 
 from spectrum.config import Config
-from spectrum.plotting import overlay
-from spectrum.spectrum import compute_spectrum_for_Nv
+from spectrum.plotting import overlay, overlay_sigma
+from spectrum.spectrum import compute_spectrum_for_Nv, compute_spectrum_sigma_sweep
 from spectrum.storage import (
     dat_path,
     ensure_results_dir,
     exists,
     load_result,
+    load_sigma_result,
     result_path,
     save_result,
+    save_sigma_result,
+    sigma_dat_path,
+    sigma_exists,
+    sigma_result_path,
 )
 
 
@@ -43,7 +48,56 @@ def parse_args():
                    help="Save the overlay figure without opening a window.")
     p.add_argument("--results-dir", default=None,
                    help="Override output directory (default: config results_dir).")
+    # ---- sigma-sweep mode (fixed Nv, multiple disorder strengths) ----
+    p.add_argument("--sigma-sweep", action="store_true",
+                   help="Sweep disorder strength sigma for a single Nv instead of "
+                        "sweeping Nv.")
+    p.add_argument("--sigmas", type=float, nargs="+", default=None,
+                   help="Sigma values for --sigma-sweep (default: config sigma_list).")
     return p.parse_args()
+
+
+def run_sigma_sweep(args, cfg: Config) -> None:
+    """Compute spectra for one Nv across several disorder strengths and overlay."""
+    # Nv for the sweep: first of --nv if given, else config default.
+    Nv = args.nv[0] if args.nv else cfg.sigma_sweep_nv
+    sigmas = args.sigmas if args.sigmas is not None else cfg.sigma_list
+
+    ensure_results_dir(cfg)
+
+    # Resume: figure out which sigmas still need computing.
+    to_compute = [s for s in sigmas if args.force or not sigma_exists(Nv, s, cfg)]
+    results = []
+    summary = []  # (sigma, status)
+
+    # Load any already-saved sigmas first.
+    for s in sigmas:
+        if s not in to_compute:
+            res = load_sigma_result(Nv, s, cfg)
+            results.append(res)
+            summary.append((s, "loaded"))
+            tqdm.write(f"[Nv={Nv} sigma={s:g}] loaded from {sigma_result_path(Nv, s, cfg)}")
+
+    # Compute the rest (static H built once inside, reused across these sigmas).
+    if to_compute:
+        computed = compute_spectrum_sigma_sweep(Nv, to_compute, cfg, show_progress=True)
+        for res in computed:
+            save_sigma_result(res, cfg)
+            results.append(res)
+            summary.append((res["sigma"], "computed"))
+            tqdm.write(
+                f"[Nv={Nv} sigma={res['sigma']:g}] computed & saved -> "
+                f"{sigma_result_path(Nv, res['sigma'], cfg)} (dim={res['dim']})"
+            )
+
+    out_fig = os.path.join(cfg.results_dir, f"overlay_sigma_Nv{Nv}.png")
+    overlay_sigma(results, cfg, out_fig, show=not args.no_show)
+
+    print("\n=== Sigma-sweep summary (Nv={}) ===".format(Nv))
+    for s, status in sorted(summary):
+        print(f"  sigma={s:<6g}  {status:<8}  {sigma_result_path(Nv, s, cfg)}  |  "
+              f"{sigma_dat_path(Nv, s, cfg)}")
+    print(f"\nOverlay figure: {out_fig}")
 
 
 def main():
@@ -56,6 +110,10 @@ def main():
         cfg.n_realizations = args.realizations
     if args.results_dir is not None:
         cfg.results_dir = args.results_dir
+
+    if args.sigma_sweep:
+        run_sigma_sweep(args, cfg)
+        return
 
     ensure_results_dir(cfg)
 

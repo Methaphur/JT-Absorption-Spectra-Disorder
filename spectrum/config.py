@@ -44,6 +44,12 @@ class Config:
     # ---------------- Nv sweep ----------------
     nv_list: List[int] = field(default_factory=lambda: list(range(2, 13)))
 
+    # ---------------- Sigma sweep (fixed Nv) ----------------
+    sigma_sweep_nv: int = 12        # Nv used for the disorder-strength sweep
+    sigma_list: List[float] = field(
+        default_factory=lambda: [0.01, 0.03, 0.05, 0.08]
+    )
+
     # ---------------- Paths ----------------
     results_dir: str = "results"
     # Optional "without disorder" reference curve (two columns: E, intensity).
