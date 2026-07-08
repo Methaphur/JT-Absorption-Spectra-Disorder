@@ -146,3 +146,78 @@ def load_sigma_result(Nv: int, sigma: float, cfg: Config) -> Optional[Dict]:
         "all_evals": data["all_evals"],
         "all_intensity": data["all_intensity"],
     }
+
+
+# ---------------------------------------------------------------------------
+# Realization-sweep results (fixed Nv & sigma, one file per realization count)
+# ---------------------------------------------------------------------------
+def realization_result_path(Nv: int, sigma: float, n: int, cfg: Config) -> str:
+    return os.path.join(
+        cfg.results_dir, f"spectrum_Nv{Nv}_{_sigma_tag(sigma)}_real{n}.npz"
+    )
+
+
+def realization_dat_path(Nv: int, sigma: float, n: int, cfg: Config) -> str:
+    return os.path.join(
+        cfg.results_dir, f"spectrum_Nv{Nv}_{_sigma_tag(sigma)}_real{n}.dat"
+    )
+
+
+def realization_exists(Nv: int, sigma: float, n: int, cfg: Config) -> bool:
+    return os.path.isfile(realization_result_path(Nv, sigma, n, cfg))
+
+
+def save_realization_result(result: Dict, cfg: Config) -> None:
+    """Save a single (Nv, sigma, n_realizations) result: .npz + portable .dat."""
+    ensure_results_dir(cfg)
+    Nv = int(result["Nv"])
+    sigma = float(result["sigma"])
+    n = int(result["n_realizations"])
+
+    np.savez_compressed(
+        realization_result_path(Nv, sigma, n, cfg),
+        Nv=Nv,
+        sigma=sigma,
+        n_realizations=n,
+        dim=int(result["dim"]),
+        E=result["E"],
+        spectrum=result["spectrum"],
+        all_evals=result["all_evals"],
+        all_intensity=result["all_intensity"],
+        # provenance
+        gamma=cfg.gamma,
+        rng_seed=cfg.rng_seed,
+        eps1=cfg.eps1,
+        eps2=cfg.eps2,
+        omega=cfg.omega,
+        kappa=cfg.kappa,
+        omega_c=cfg.omega_c,
+        Omega=cfg.Omega,
+    )
+
+    np.savetxt(
+        realization_dat_path(Nv, sigma, n, cfg),
+        np.column_stack([result["E"], result["spectrum"]]),
+        header=(
+            f"Nv={Nv}  sigma={sigma:g}  n_realizations={n}  dim={result['dim']}"
+            f"\nE(eV)    intensity"
+        ),
+    )
+
+
+def load_realization_result(Nv: int, sigma: float, n: int, cfg: Config) -> Optional[Dict]:
+    """Load a previously saved (Nv, sigma, n) result, or None if absent."""
+    path = realization_result_path(Nv, sigma, n, cfg)
+    if not os.path.isfile(path):
+        return None
+    data = np.load(path)
+    return {
+        "Nv": int(data["Nv"]),
+        "sigma": float(data["sigma"]),
+        "n_realizations": int(data["n_realizations"]),
+        "dim": int(data["dim"]),
+        "E": data["E"],
+        "spectrum": data["spectrum"],
+        "all_evals": data["all_evals"],
+        "all_intensity": data["all_intensity"],
+    }

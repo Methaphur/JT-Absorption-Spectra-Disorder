@@ -50,6 +50,12 @@ class Config:
         default_factory=lambda: [0, 0.01, 0.03, 0.05, 0.08]
     )
 
+    # ---------------- Realization sweep (fixed Nv, fixed sigma) ----------------
+    realization_sweep_nv: int = 12  # Nv used for the realization-count sweep
+    realization_list: List[int] = field(
+        default_factory=lambda: [10, 50, 100, 200]
+    )
+
     # ---------------- Paths ----------------
     results_dir: str = "results"
     # "Without disorder" reference curve. Columns: E, I (0 and 1). Plotted on top

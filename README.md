@@ -139,6 +139,8 @@ venv/bin/python main.py [--nv N [N ...]] [--realizations K]
 | `--results-dir D` | Write outputs to `D` instead of the configured `results/`.                  |
 | `--sigma-sweep`   | Sweep disorder strength `sigma` for a **single** `Nv` instead of sweeping `Nv`. |
 | `--sigmas S [S ...]` | Sigma values for `--sigma-sweep` (default: `Config.sigma_list`).         |
+| `--realization-sweep` | Sweep the number of disorder realizations for a **single** `Nv` (convergence study). |
+| `--realization-list N [N ...]` | Realization counts for `--realization-sweep` (default: `Config.realization_list`). |
 
 **Examples**
 
@@ -186,6 +188,41 @@ for res in results:
     print(res["sigma"], res["spectrum"].max())
 ```
 
+### Realization sweep (fixed Nv & sigma, varying #realizations)
+
+A convergence study: compute the spectrum for **one** `Nv` at several disorder
+**realization counts** and overlay them, to see how the disorder average settles as
+more samples are added. The disorder loop runs **once** at the largest requested
+count; each smaller count reuses the leading realizations (numerically identical to an
+independent shorter run, since the RNG is seeded once).
+
+```bash
+# Convergence for Nv=12 using the configured realization_list
+venv/bin/python main.py --realization-sweep --nv 12
+
+# Explicit counts, headless
+venv/bin/python main.py --realization-sweep --nv 8 --realization-list 10 50 100 200 --no-show
+```
+
+- The `Nv` is the first value passed to `--nv`, or `Config.realization_sweep_nv`
+  (default `12`). The disorder strength is `Config.sigma`.
+- Counts come from `--realization-list`, or `Config.realization_list`
+  (default `[10, 50, 100, 200]`).
+- Each `(Nv, sigma, n)` is saved to its own file and resumed/skipped on rerun; use
+  `--force` to recompute.
+
+Programmatic use:
+
+```python
+from spectrum.config import Config
+from spectrum.spectrum import compute_spectrum_realization_sweep
+
+cfg = Config()
+results = compute_spectrum_realization_sweep(Nv=12, realization_list=[10, 50, 100], cfg=cfg)
+for res in results:
+    print(res["n_realizations"], res["spectrum"].max())
+```
+
 ---
 
 ## Configuration
@@ -214,7 +251,9 @@ dataclass. Edit the defaults there, or override the common ones from the command
 | `jz_target`        | `-1`           | `Jz` sector                                        |
 | `nv_list`          | `range(2,13)`  | Default `Nv` sweep                                 |
 | `sigma_sweep_nv`   | `12`           | `Nv` used by `--sigma-sweep` when `--nv` is omitted |
-| `sigma_list`       | `[0.01,0.03,0.05,0.08]` | Default disorder strengths for the sigma sweep |
+| `sigma_list`       | `[0,0.01,0.03,0.05,0.08]` | Default disorder strengths for the sigma sweep |
+| `realization_sweep_nv` | `12`       | `Nv` used by `--realization-sweep` when `--nv` is omitted |
+| `realization_list` | `[10,50,100,200]` | Default realization counts for the realization sweep |
 | `results_dir`      | `"results"`    | Output directory                                   |
 | `reference_file`   | `None`         | Optional "without disorder" curve (see below)      |
 
@@ -256,6 +295,12 @@ The **sigma sweep** writes analogous files tagged by both `Nv` and `sigma`:
   (the `.npz` also stores the `sigma` used).
 - `results/overlay_sigma_Nv{Nv}.png` — the spectra for that `Nv` overlaid, one curve
   per `sigma`.
+
+The **realization sweep** writes files tagged by `Nv`, `sigma`, and count:
+
+- `results/spectrum_Nv{Nv}_sigma{sigma}_real{n}.npz` and `.dat` — one per count.
+- `results/overlay_realizations_Nv{Nv}_sigma{sigma}.png` — spectra for that `Nv`
+  overlaid, one curve per realization count.
 
 Loading a saved result in your own script:
 

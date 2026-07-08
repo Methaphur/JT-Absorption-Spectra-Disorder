@@ -61,20 +61,25 @@ def _disorder_average(
     cfg: Config,
     show_progress: bool,
     desc: str,
+    n_realizations: int = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Average over disorder realizations at a given ``sigma``.
 
     The electronic diagonal is added in place before ``eigh`` and restored
-    afterwards, so ``H`` is left unchanged for reuse across sigmas.
+    afterwards, so ``H`` is left unchanged for reuse across sigmas. Pass
+    ``n_realizations`` to override ``cfg.n_realizations`` (used by the
+    realization sweep). Because the RNG is seeded once, the first ``n`` rows of
+    a longer run are identical to an independent ``n``-realization run.
     """
+    n_real = cfg.n_realizations if n_realizations is None else n_realizations
     dim = H.shape[0]
     d = np.arange(dim)
     rng = np.random.default_rng(cfg.rng_seed)
 
-    all_evals = np.empty((cfg.n_realizations, dim))
-    all_intensity = np.empty((cfg.n_realizations, dim))
+    all_evals = np.empty((n_real, dim))
+    all_intensity = np.empty((n_real, dim))
 
-    iterator = range(cfg.n_realizations)
+    iterator = range(n_real)
     if show_progress:
         iterator = tqdm(iterator, desc=desc, leave=False, unit="real")
 
@@ -169,6 +174,49 @@ def compute_spectrum_sigma_sweep(
                 "spectrum": spectrum,
                 "all_evals": all_evals,
                 "all_intensity": all_intensity,
+            }
+        )
+
+    return results
+
+
+def compute_spectrum_realization_sweep(
+    Nv: int,
+    realization_list: Sequence[int],
+    cfg: Config,
+    show_progress: bool = True,
+) -> List[Dict]:
+    """Compute one spectrum per disorder-realization count for a fixed ``Nv``.
+
+    Shows how the disorder average converges with the number of realizations.
+    The disorder loop runs **once** at ``max(realization_list)`` and each smaller
+    count reuses the leading rows (identical to an independent shorter run since
+    the RNG is seeded once). Returns a list of result dicts, one per realization
+    count, each with an ``n_realizations`` key.
+    """
+    H, mask1, mask2, i0, dim = _prepare_Nv(Nv, cfg, show_progress)
+
+    counts = sorted(set(int(n) for n in realization_list))
+    n_max = counts[-1]
+
+    all_evals, all_intensity = _disorder_average(
+        H, mask1, mask2, i0, cfg.sigma, cfg, show_progress,
+        f"  disorder(Nv={Nv}, n={n_max})", n_realizations=n_max,
+    )
+
+    results: List[Dict] = []
+    for n in counts:
+        E, spectrum = _broaden(all_evals[:n], all_intensity[:n], cfg)
+        results.append(
+            {
+                "Nv": Nv,
+                "sigma": cfg.sigma,
+                "n_realizations": n,
+                "dim": dim,
+                "E": E,
+                "spectrum": spectrum,
+                "all_evals": all_evals[:n],
+                "all_intensity": all_intensity[:n],
             }
         )
 

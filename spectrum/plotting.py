@@ -87,3 +87,31 @@ def overlay_sigma(
 
     _plot_reference(ax, cfg)  # drawn last -> sits on top
     return _finish(fig, ax, cfg, out_path, show)
+
+
+def overlay_realizations(
+    results: List[Dict],
+    cfg: Config,
+    out_path: str,
+    show: bool = True,
+) -> str:
+    """Plot spectra for a single Nv across realization counts; reference on top."""
+    if not show:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    Nv = results[0]["Nv"] if results else "?"
+    sigma = results[0].get("sigma", cfg.sigma) if results else cfg.sigma
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.set_title(
+        f"Absorption vs #realizations (Nv={Nv}, σ={sigma:g} eV, κ/ω = 2.2)"
+    )
+
+    for res in sorted(results, key=lambda r: r["n_realizations"]):
+        ax.plot(
+            res["E"], res["spectrum"], linewidth=1.5,
+            label=f"{res['n_realizations']} realizations",
+        )
+
+    _plot_reference(ax, cfg)  # drawn last -> sits on top
+    return _finish(fig, ax, cfg, out_path, show)

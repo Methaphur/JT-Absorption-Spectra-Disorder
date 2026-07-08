@@ -19,15 +19,24 @@ import os
 from tqdm import tqdm
 
 from spectrum.config import Config
-from spectrum.plotting import overlay, overlay_sigma
-from spectrum.spectrum import compute_spectrum_for_Nv, compute_spectrum_sigma_sweep
+from spectrum.plotting import overlay, overlay_realizations, overlay_sigma
+from spectrum.spectrum import (
+    compute_spectrum_for_Nv,
+    compute_spectrum_realization_sweep,
+    compute_spectrum_sigma_sweep,
+)
 from spectrum.storage import (
     dat_path,
     ensure_results_dir,
     exists,
+    load_realization_result,
     load_result,
     load_sigma_result,
+    realization_dat_path,
+    realization_exists,
+    realization_result_path,
     result_path,
+    save_realization_result,
     save_result,
     save_sigma_result,
     sigma_dat_path,
@@ -54,6 +63,13 @@ def parse_args():
                         "sweeping Nv.")
     p.add_argument("--sigmas", type=float, nargs="+", default=None,
                    help="Sigma values for --sigma-sweep (default: config sigma_list).")
+    # ---- realization-sweep mode (fixed Nv & sigma, multiple realization counts) ----
+    p.add_argument("--realization-sweep", action="store_true",
+                   help="Sweep the number of disorder realizations for a single Nv "
+                        "(convergence study) instead of sweeping Nv.")
+    p.add_argument("--realization-list", type=int, nargs="+", default=None,
+                   help="Realization counts for --realization-sweep "
+                        "(default: config realization_list).")
     # ---- reference ("without disorder") curve, overlaid on top ----
     p.add_argument("--reference", action=argparse.BooleanOptionalAction, default=True,
                    help="Overlay the reference curve on top (use --no-reference to hide).")
@@ -113,6 +129,49 @@ def run_sigma_sweep(args, cfg: Config) -> None:
     print(f"\nOverlay figure: {out_fig}")
 
 
+def run_realization_sweep(args, cfg: Config) -> None:
+    """Compute spectra for one Nv across realization counts and overlay them."""
+    Nv = args.nv[0] if args.nv else cfg.realization_sweep_nv
+    counts = args.realization_list if args.realization_list is not None else cfg.realization_list
+    counts = sorted(set(int(n) for n in counts))
+    sigma = cfg.sigma
+
+    ensure_results_dir(cfg)
+
+    to_compute = [n for n in counts if args.force or not realization_exists(Nv, sigma, n, cfg)]
+    results = []
+    summary = []  # (n, status)
+
+    # Load any already-saved counts.
+    for n in counts:
+        if n not in to_compute:
+            res = load_realization_result(Nv, sigma, n, cfg)
+            results.append(res)
+            summary.append((n, "loaded"))
+            tqdm.write(f"[Nv={Nv} n={n}] loaded from {realization_result_path(Nv, sigma, n, cfg)}")
+
+    # Compute the rest in a single disorder pass (at the largest requested count).
+    if to_compute:
+        computed = compute_spectrum_realization_sweep(Nv, to_compute, cfg, show_progress=True)
+        for res in computed:
+            save_realization_result(res, cfg)
+            results.append(res)
+            summary.append((res["n_realizations"], "computed"))
+            tqdm.write(
+                f"[Nv={Nv} n={res['n_realizations']}] computed & saved -> "
+                f"{realization_result_path(Nv, sigma, res['n_realizations'], cfg)} (dim={res['dim']})"
+            )
+
+    out_fig = os.path.join(cfg.results_dir, f"overlay_realizations_Nv{Nv}_sigma{sigma:g}.png")
+    overlay_realizations(results, cfg, out_fig, show=not args.no_show)
+
+    print(f"\n=== Realization-sweep summary (Nv={Nv}, sigma={sigma:g}) ===")
+    for n, status in sorted(summary):
+        print(f"  n={n:<6} {status:<8}  {realization_result_path(Nv, sigma, n, cfg)}  |  "
+              f"{realization_dat_path(Nv, sigma, n, cfg)}")
+    print(f"\nOverlay figure: {out_fig}")
+
+
 def main():
     args = parse_args()
 
@@ -127,6 +186,10 @@ def main():
 
     if args.sigma_sweep:
         run_sigma_sweep(args, cfg)
+        return
+
+    if args.realization_sweep:
+        run_realization_sweep(args, cfg)
         return
 
     ensure_results_dir(cfg)
