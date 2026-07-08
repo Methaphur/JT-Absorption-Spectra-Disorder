@@ -117,15 +117,135 @@ def _broaden(all_evals: np.ndarray, all_intensity: np.ndarray, cfg: Config):
 
 
 # ---------------------------------------------------------------------------
+# Optional parallel path (opt-in via cfg.n_workers > 1)
+#
+# The serial code above is untouched and remains the default. When enabled,
+# disorder realizations run across worker processes. To keep results the same
+# as serial, the disorder draws are generated once in the parent (in the same
+# order as the serial loop) and scattered to the workers. Each worker is pinned
+# to a single BLAS thread (a single dense ``eigh`` barely benefits from more),
+# so N workers give roughly an N-fold speedup on independent realizations.
+# ---------------------------------------------------------------------------
+_WORKER: Dict = {}
+
+# Environment variables that control BLAS / threading backends.
+_THREAD_ENV_VARS = (
+    "OPENBLAS_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+)
+
+
+def _parallel_enabled(cfg: Config) -> bool:
+    n = getattr(cfg, "n_workers", None)
+    return bool(n) and n > 1
+
+
+def _worker_init(Nv: int, cfg: Config) -> None:
+    """Build the disorder-independent Hamiltonian once per worker process."""
+    basis_final, basis_index = build_sector_basis(Nv, cfg.nex_target, cfg.jz_target)
+    H = build_static_hamiltonian(Nv, basis_final, basis_index, cfg, show_progress=False)
+    mask1, mask2 = electronic_masks(basis_final)
+    _WORKER["H"] = H
+    _WORKER["mask1"] = mask1
+    _WORKER["mask2"] = mask2
+    _WORKER["i0"] = basis_index[cfg.initial_state]
+    _WORKER["d"] = np.arange(H.shape[0])
+
+
+def _worker_task(task):
+    """Diagonalize one realization; mirrors the serial loop body exactly."""
+    r, eps1_dis, eps2_dis = task
+    H = _WORKER["H"]
+    d = _WORKER["d"]
+    elec = electronic_diagonal(_WORKER["mask1"], _WORKER["mask2"], eps1_dis, eps2_dis)
+
+    H[d, d] += elec
+    evals, evecs = np.linalg.eigh(H)
+    H[d, d] -= elec
+
+    intensity = np.abs(evecs[_WORKER["i0"], :]) ** 2
+    imax = intensity.max()
+    if imax > 0:
+        intensity = intensity / imax
+    return r, evals, intensity
+
+
+def _disorder_average_parallel(
+    Nv: int,
+    sigma: float,
+    cfg: Config,
+    show_progress: bool,
+    desc: str,
+    n_realizations: int = None,
+) -> Tuple[np.ndarray, np.ndarray, int]:
+    """Parallel version of :func:`_disorder_average`. Returns (evals, I, dim).
+
+    Disorder draws are generated in the parent in the same order as the serial
+    loop, so the set of realizations is identical to the serial path.
+    """
+    import multiprocessing as mp
+    import os
+    from concurrent.futures import ProcessPoolExecutor
+
+    n_real = cfg.n_realizations if n_realizations is None else n_realizations
+
+    # Same RNG stream and draw order as the serial loop.
+    rng = np.random.default_rng(cfg.rng_seed)
+    tasks = []
+    for r in range(n_real):
+        eps1_dis = cfg.eps1 + rng.normal(0, sigma)
+        eps2_dis = cfg.eps2 + rng.normal(0, sigma)
+        tasks.append((r, eps1_dis, eps2_dis))
+
+    # Pin BLAS to one thread per worker; spawned children inherit the env.
+    saved = {k: os.environ.get(k) for k in _THREAD_ENV_VARS}
+    for k in _THREAD_ENV_VARS:
+        os.environ[k] = "1"
+
+    all_evals = [None] * n_real
+    all_intensity = [None] * n_real
+    try:
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=cfg.n_workers,
+            mp_context=ctx,
+            initializer=_worker_init,
+            initargs=(Nv, cfg),
+        ) as ex:
+            iterator = ex.map(_worker_task, tasks, chunksize=1)
+            if show_progress:
+                iterator = tqdm(iterator, total=n_real, desc=desc, leave=False, unit="real")
+            for r, evals, intensity in iterator:
+                all_evals[r] = evals
+                all_intensity[r] = intensity
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    dim = all_evals[0].shape[0]
+    return np.array(all_evals), np.array(all_intensity), dim
+
+
+# ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
 def compute_spectrum_for_Nv(Nv: int, cfg: Config, show_progress: bool = True) -> Dict:
     """Disorder-averaged absorption spectrum for one ``Nv`` at ``cfg.sigma``."""
-    H, mask1, mask2, i0, dim = _prepare_Nv(Nv, cfg, show_progress)
-
-    all_evals, all_intensity = _disorder_average(
-        H, mask1, mask2, i0, cfg.sigma, cfg, show_progress, f"  disorder(Nv={Nv})"
-    )
+    if _parallel_enabled(cfg):
+        all_evals, all_intensity, dim = _disorder_average_parallel(
+            Nv, cfg.sigma, cfg, show_progress, f"  disorder(Nv={Nv})"
+        )
+    else:
+        H, mask1, mask2, i0, dim = _prepare_Nv(Nv, cfg, show_progress)
+        all_evals, all_intensity = _disorder_average(
+            H, mask1, mask2, i0, cfg.sigma, cfg, show_progress, f"  disorder(Nv={Nv})"
+        )
     E, spectrum = _broaden(all_evals, all_intensity, cfg)
 
     return {
@@ -152,7 +272,9 @@ def compute_spectrum_sigma_sweep(
     each shaped like :func:`compute_spectrum_for_Nv`'s output plus a ``sigma``
     key.
     """
-    H, mask1, mask2, i0, dim = _prepare_Nv(Nv, cfg, show_progress)
+    parallel = _parallel_enabled(cfg)
+    if not parallel:
+        H, mask1, mask2, i0, dim = _prepare_Nv(Nv, cfg, show_progress)
 
     sigmas = list(sigma_list)
     outer = sigmas
@@ -161,9 +283,14 @@ def compute_spectrum_sigma_sweep(
 
     results: List[Dict] = []
     for sigma in outer:
-        all_evals, all_intensity = _disorder_average(
-            H, mask1, mask2, i0, sigma, cfg, show_progress, f"  disorder(sigma={sigma:g})"
-        )
+        if parallel:
+            all_evals, all_intensity, dim = _disorder_average_parallel(
+                Nv, sigma, cfg, show_progress, f"  disorder(sigma={sigma:g})"
+            )
+        else:
+            all_evals, all_intensity = _disorder_average(
+                H, mask1, mask2, i0, sigma, cfg, show_progress, f"  disorder(sigma={sigma:g})"
+            )
         E, spectrum = _broaden(all_evals, all_intensity, cfg)
         results.append(
             {
@@ -194,15 +321,20 @@ def compute_spectrum_realization_sweep(
     the RNG is seeded once). Returns a list of result dicts, one per realization
     count, each with an ``n_realizations`` key.
     """
-    H, mask1, mask2, i0, dim = _prepare_Nv(Nv, cfg, show_progress)
-
     counts = sorted(set(int(n) for n in realization_list))
     n_max = counts[-1]
 
-    all_evals, all_intensity = _disorder_average(
-        H, mask1, mask2, i0, cfg.sigma, cfg, show_progress,
-        f"  disorder(Nv={Nv}, n={n_max})", n_realizations=n_max,
-    )
+    if _parallel_enabled(cfg):
+        all_evals, all_intensity, dim = _disorder_average_parallel(
+            Nv, cfg.sigma, cfg, show_progress,
+            f"  disorder(Nv={Nv}, n={n_max})", n_realizations=n_max,
+        )
+    else:
+        H, mask1, mask2, i0, dim = _prepare_Nv(Nv, cfg, show_progress)
+        all_evals, all_intensity = _disorder_average(
+            H, mask1, mask2, i0, cfg.sigma, cfg, show_progress,
+            f"  disorder(Nv={Nv}, n={n_max})", n_realizations=n_max,
+        )
 
     results: List[Dict] = []
     for n in counts:

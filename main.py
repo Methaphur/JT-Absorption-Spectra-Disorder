@@ -57,6 +57,10 @@ def parse_args():
                    help="Save the overlay figure without opening a window.")
     p.add_argument("--results-dir", default=None,
                    help="Override output directory (default: config results_dir).")
+    p.add_argument("--workers", type=int, default=None,
+                   help="Run disorder realizations across this many processes "
+                        "(default: serial). >1 enables parallelism; each worker is "
+                        "pinned to one BLAS thread. Results match the serial run.")
     # ---- sigma-sweep mode (fixed Nv, multiple disorder strengths) ----
     p.add_argument("--sigma-sweep", action="store_true",
                    help="Sweep disorder strength sigma for a single Nv instead of "
@@ -182,6 +186,8 @@ def main():
         cfg.n_realizations = args.realizations
     if args.results_dir is not None:
         cfg.results_dir = args.results_dir
+    if args.workers is not None:
+        cfg.n_workers = args.workers
     apply_reference_args(args, cfg)
 
     if args.sigma_sweep:

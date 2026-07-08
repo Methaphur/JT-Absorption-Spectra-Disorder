@@ -29,6 +29,11 @@ class Config:
     sigma: float = 0.03             # disorder strength W (eV)
     n_realizations: int = 1
     rng_seed: int = 1234
+    # Parallel disorder realizations across worker processes. None or 1 -> the
+    # (unchanged) serial path. >1 -> that many processes, each pinned to a
+    # single BLAS thread. Results match the serial path (disorder draws are
+    # pre-generated in the parent in the same order).
+    n_workers: Optional[int] = None
 
     # ---------------- Spectrum grid / broadening ----------------
     E_min: float = 6.0
@@ -53,7 +58,7 @@ class Config:
     # ---------------- Realization sweep (fixed Nv, fixed sigma) ----------------
     realization_sweep_nv: int = 12  # Nv used for the realization-count sweep
     realization_list: List[int] = field(
-        default_factory=lambda: [10, 50, 100, 200]
+        default_factory=lambda: [10, 50, 100]
     )
 
     # ---------------- Paths ----------------

@@ -137,6 +137,7 @@ venv/bin/python main.py [--nv N [N ...]] [--realizations K]
 | `--force`         | Recompute every `Nv` even if a saved result already exists.                 |
 | `--no-show`       | Save the overlay figure without opening an interactive window (headless).   |
 | `--results-dir D` | Write outputs to `D` instead of the configured `results/`.                  |
+| `--workers N`     | Run disorder realizations across `N` processes (default: serial). See [performance notes](#performance-notes). |
 | `--sigma-sweep`   | Sweep disorder strength `sigma` for a **single** `Nv` instead of sweeping `Nv`. |
 | `--sigmas S [S ...]` | Sigma values for `--sigma-sweep` (default: `Config.sigma_list`).         |
 | `--realization-sweep` | Sweep the number of disorder realizations for a **single** `Nv` (convergence study). |
@@ -366,6 +367,51 @@ Three nested `tqdm` bars are shown:
 - **Everything is resumable.** Because each `Nv` is saved as soon as it finishes, you
   can stop the run (Ctrl-C) and restart later — completed `Nv` are loaded from disk and
   skipped. Use `--force` to recompute.
+
+### Parallel realizations (`--workers`)
+
+Disorder realizations are independent, so they can run across processes:
+
+```bash
+venv/bin/python main.py --nv 12 --workers 4        # 4 worker processes
+```
+
+- Default (no `--workers`, or `--workers 1`) runs the **unchanged serial path**.
+- Workers are each pinned to a single BLAS thread, and the disorder draws are
+  pre-generated in the parent in the same order, so **results are identical to the
+  serial run** (to floating-point noise, ~1e-13, far below `gamma`).
+
+**Expect only a modest speedup on a typical desktop.** The cost is dominated by dense
+`numpy.linalg.eigh`, which is **memory-bandwidth-bound** — computing every eigenvector
+streams large amounts of data, and the CPU cores share one memory bus. Measured on an
+8-core desktop (dim≈2040):
+
+| workers | speedup |
+|---------|---------|
+| serial  | 1.0×    |
+| 2       | 1.1×    |
+| 4       | **1.3×** (sweet spot) |
+| 8       | 1.2× (no better — bandwidth saturated) |
+
+So `--workers 2`–`4` is worthwhile; beyond that it stops helping on this class of
+machine. On a workstation/cluster node with more memory channels or NUMA, it scales
+considerably better, which is where large `Nv=12 × 200`-realization runs belong. For an
+order-of-magnitude speedup on any hardware, the real lever is algorithmic — see below.
+
+### Bigger optimizations (not yet implemented)
+
+- **Sparse spectral method (largest win, ~50–500×).** The spectrum is the projected
+  spectral function ⟨i0|δ(E−H)|i0⟩, and `H` is only ~0.05% filled while just ~120–370 of
+  the 6900 eigenstates carry any intensity. A **Kernel Polynomial (Chebyshev)** or
+  **Lanczos continued-fraction** method computes this with sparse matrix-vector products
+  and never forms the eigenvectors — sidestepping both the O(dim³) cost and the memory
+  wall above. Caveat: it changes the numerical method and the per-realization
+  max-normalization would need a physics decision, so it warrants validation against the
+  dense result.
+- **Fewer realizations.** Use `--realization-sweep` to find the smallest converged
+  realization count; dropping 200→50 (if converged) is a free 4×.
+- **`float32`** would roughly halve `eigh` time at some precision cost (likely fine
+  relative to `gamma = 0.044`), but is a lower-priority, riskier tweak.
 
 ---
 
